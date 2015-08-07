@@ -336,8 +336,8 @@ def get_connection_account(connection):
     return connection.layer1.aws_access_key_id
 
 
-def find_retrieval_jobs(vault, archive_id):
-    return [job for job in vault.list_jobs() if job.archive_id == archive_id]
+def find_retrieval_jobs(vault, archive_id, byte_range=None):
+    return [job for job in vault.list_jobs() if job.archive_id == archive_id and (byte_range is None or job.byte_range == byte_range)]
 
 
 def find_inventory_jobs(vault, max_age_hours=0):
@@ -538,44 +538,61 @@ class App(object):
                 raise
 
     @classmethod
-    def _archive_retrieve_completed(cls, args, job, name):
+    def _archive_retrieve_completed(cls, args, job, name, chunks=1, chunk=0):
         if args.output_filename == '-':
             cls._write_archive_retrieval_job(
                 sys.stdout, job, args.multipart_size)
         else:
+            file_suffix = ''
+            if chunks > 1:
+                file_suffix = '.{0}'.format(chunk)
             if args.output_filename:
                 filename = args.output_filename
             else:
                 filename = os.path.basename(name)
-            with open(filename, 'wb') as f:
+            with open(filename + file_suffix, 'wb') as f:
                 cls._write_archive_retrieval_job(f, job, args.multipart_size)
 
-    def archive_retrieve_one(self, name):
+    def archive_retrieve_one(self, name, retrieval_size=None, chunk_start=0):
         try:
             archive_id = self.cache.get_archive_id(self.args.vault, name)
+            archive_size = self.cache.get_archive_size(self.args.vault, name)
         except KeyError:
             raise ConsoleError('archive %r not found' % name)
 
         vault = self.connection.get_vault(self.args.vault)
-        retrieval_jobs = find_retrieval_jobs(vault, archive_id)
 
-        complete_job = find_complete_job(retrieval_jobs)
-        if complete_job:
-            self._archive_retrieve_completed(self.args, complete_job, name)
-        elif has_pending_job(retrieval_jobs):
-            if self.args.wait:
-                complete_job = wait_until_job_completed(retrieval_jobs)
-                self._archive_retrieve_completed(self.args, complete_job, name)
-            else:
-                raise RetryConsoleError('job still pending for archive %r' % name)
+        # TODO: multiple chunks requires --wait?
+        if retrieval_size and retrieval_size < archive_size:
+            chunks = (archive_size + (retrieval_size-1)) / retrieval_size
         else:
-            # create an archive retrieval job
-            job = vault.retrieve_archive(archive_id)
-            if self.args.wait:
-                wait_until_job_completed([job])
-                self._archive_retrieve_completed(self.args, job, name)
+            retrieval_size = archive_size
+            chunks = 1
+
+        for chunk in range(chunk_start, chunks):
+            byte_start = retrieval_size * chunk
+            byte_end = min(retrieval_size * (chunk + 1) - 1, archive_size - 1)
+            byte_range = '{0}-{1}'.format(byte_start, byte_end)
+
+            retrieval_jobs = find_retrieval_jobs(vault, archive_id, byte_range)
+
+            complete_job = find_complete_job(retrieval_jobs)
+            if complete_job:
+                self._archive_retrieve_completed(self.args, complete_job, name, chunks, chunk)
+            elif has_pending_job(retrieval_jobs):
+                if self.args.wait:
+                    complete_job = wait_until_job_completed(retrieval_jobs)
+                    self._archive_retrieve_completed(self.args, complete_job, name, chunks, chunk)
+                else:
+                    raise RetryConsoleError('job still pending for archive %r' % name)
             else:
-                raise RetryConsoleError('queued retrieval job for archive %r' % name)
+                # create an archive retrieval job
+                job = vault.retrieve_archive(archive_id, byte_range=byte_range)
+                if self.args.wait:
+                    wait_until_job_completed([job])
+                    self._archive_retrieve_completed(self.args, job, name, chunks, chunk)
+                else:
+                    raise RetryConsoleError('queued retrieval job for archive %r' % name)
 
     def archive_retrieve(self):
         if len(self.args.names) > 1 and self.args.output_filename:
@@ -584,7 +601,8 @@ class App(object):
         retry_list = []
         for name in self.args.names:
             try:
-                self.archive_retrieve_one(name)
+                self.archive_retrieve_one(name, self.args.retrieval_size,
+                                          self.args.chunk_start)
             except RetryConsoleError as e:
                 retry_list.append(e.message)
             else:
@@ -687,6 +705,9 @@ class App(object):
                                                 metavar='name')
         archive_retrieve_subparser.add_argument('--multipart-size', type=int,
                 default=(8*1024*1024))
+        archive_retrieve_subparser.add_argument('--retrieval-size', type=int)
+        archive_retrieve_subparser.add_argument('--chunk-start', type=int,
+                default=0)
         archive_retrieve_subparser.add_argument('-o', dest='output_filename',
                                                 metavar='OUTPUT_FILENAME')
         archive_retrieve_subparser.add_argument('--wait', action='store_true')
