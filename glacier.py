@@ -102,6 +102,7 @@ class Cache(object):
         __tablename__ = 'archive'
         id = sqlalchemy.Column(sqlalchemy.String, primary_key=True)
         name = sqlalchemy.Column(sqlalchemy.String)
+        size = sqlalchemy.Column(sqlalchemy.BigInteger)
         vault = sqlalchemy.Column(sqlalchemy.String, nullable=False)
         key = sqlalchemy.Column(sqlalchemy.String, nullable=False)
         last_seen_upstream = sqlalchemy.Column(sqlalchemy.Integer)
@@ -125,9 +126,9 @@ class Cache(object):
         self.Session.configure(bind=self.engine)
         self.session = self.Session()
 
-    def add_archive(self, vault, name, id):
+    def add_archive(self, vault, name, size, id):
         self.session.add(self.Archive(key=self.key,
-                                      vault=vault, name=name, id=id))
+                                      vault=vault, name=name, size=size, id=id))
         self.session.commit()
 
     def _get_archive_query_by_ref(self, vault, ref):
@@ -153,6 +154,13 @@ class Cache(object):
         except sqlalchemy.orm.exc.NoResultFound:
             raise KeyError(ref)
         return result.name
+
+    def get_archive_size(self, vault, ref):
+        try:
+            result = self._get_archive_query_by_ref(vault, ref).one()
+        except sqlalchemy.orm.exc.NoResultFound:
+            raise KeyError(ref)
+        return result.size
 
     def get_archive_last_seen(self, vault, ref):
         try:
@@ -221,7 +229,7 @@ class Cache(object):
                 ])
 
     def mark_seen_upstream(
-            self, vault, id, name, upstream_creation_date,
+            self, vault, id, name, size, upstream_creation_date,
             upstream_inventory_date, upstream_inventory_job_creation_date,
             fix=False):
 
@@ -258,8 +266,8 @@ class Cache(object):
         except sqlalchemy.orm.exc.NoResultFound:
             self.session.add(
                 self.Archive(
-                    key=self.key, vault=vault, name=name, id=id,
-                    last_seen_upstream=last_seen_upstream
+                    key=self.key, vault=vault, name=name, size=size,
+                    id=id, last_seen_upstream=last_seen_upstream
                     )
                 )
         else:
@@ -424,11 +432,13 @@ class App(object):
         for archive in response['ArchiveList']:
             id = archive['ArchiveId']
             name = archive['ArchiveDescription']
+            size = archive['Size']
             creation_date = iso8601_to_unix_timestamp(archive['CreationDate'])
             self.cache.mark_seen_upstream(
                 vault=vault.name,
                 id=id,
                 name=name,
+                size=size,
                 upstream_creation_date=creation_date,
                 upstream_inventory_date=inventory_date,
                 upstream_inventory_job_creation_date=job_creation_date,
@@ -484,11 +494,13 @@ class App(object):
         #       allowable characters are 7 bit ASCII without control codes,
         #       specifically ASCII values 32-126 decimal or 0x20-0x7E
         #       hexadecimal."
+        size = None
         if self.args.name is not None:
             name = self.args.name
         else:
             try:
                 full_name = self.args.file.name
+                size = os.path.getsize(full_name)
             except:
                 raise RuntimeError('Archive name not specified. Use --name')
             name = os.path.basename(full_name)
@@ -496,7 +508,7 @@ class App(object):
         vault = self.connection.get_vault(self.args.vault)
         archive_id = vault.create_archive_from_file(
             file_obj=self.args.file, description=name)
-        self.cache.add_archive(self.args.vault, name, archive_id)
+        self.cache.add_archive(self.args.vault, name, size, archive_id)
 
     @staticmethod
     def _write_archive_retrieval_job(f, job, multipart_size):
