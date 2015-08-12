@@ -511,26 +511,29 @@ class App(object):
         self.cache.add_archive(self.args.vault, name, size, archive_id)
 
     @staticmethod
-    def _write_archive_retrieval_job(f, job, multipart_size):
-        if job.archive_size > multipart_size:
+    def _write_archive_retrieval_job(f, job, retrieval_size, multipart_size):
+        if retrieval_size is None:
+            retrieval_size = job.archive_size
+
+        if retrieval_size > multipart_size:
             def fetch(start, end):
                 byte_range = start, end-1
                 f.write(job.get_output(byte_range).read())
 
-            whole_parts = job.archive_size // multipart_size
+            whole_parts = retrieval_size // multipart_size
             for first_byte in xrange(0, whole_parts * multipart_size,
                                 multipart_size):
                 fetch(first_byte, first_byte + multipart_size)
-            remainder = job.archive_size % multipart_size
+            remainder = retrieval_size % multipart_size
             if remainder:
-                fetch(job.archive_size - remainder, job.archive_size)
+                fetch(retrieval_size - remainder, retrieval_size)
         else:
             f.write(job.get_output().read())
 
         # Make sure that the file now exactly matches the downloaded archive,
         # even if the file existed before and was longer.
         try:
-            f.truncate(job.archive_size)
+            f.truncate(retrieval_size)
         except IOError as e:
             # Allow ESPIPE, since the "file" couldn't have existed before in
             # this case.
@@ -538,10 +541,10 @@ class App(object):
                 raise
 
     @classmethod
-    def _archive_retrieve_completed(cls, args, job, name, chunks=1, chunk=0):
+    def _archive_retrieve_completed(cls, args, job, name, retrieval_size=None, chunks=1, chunk=0):
         if args.output_filename == '-':
             cls._write_archive_retrieval_job(
-                sys.stdout, job, args.multipart_size)
+                sys.stdout, job, retrieval_size, args.multipart_size)
         else:
             file_suffix = ''
             if chunks > 1:
@@ -551,7 +554,7 @@ class App(object):
             else:
                 filename = os.path.basename(name)
             with open(filename + file_suffix, 'wb') as f:
-                cls._write_archive_retrieval_job(f, job, args.multipart_size)
+                cls._write_archive_retrieval_job(f, job, retrieval_size, args.multipart_size)
 
     def archive_retrieve_one(self, name, retrieval_size=None, chunk_start=0):
         try:
@@ -578,11 +581,11 @@ class App(object):
 
             complete_job = find_complete_job(retrieval_jobs)
             if complete_job:
-                self._archive_retrieve_completed(self.args, complete_job, name, chunks, chunk)
+                self._archive_retrieve_completed(self.args, complete_job, name, byte_end - byte_start + 1, chunks, chunk)
             elif has_pending_job(retrieval_jobs):
                 if self.args.wait:
                     complete_job = wait_until_job_completed(retrieval_jobs)
-                    self._archive_retrieve_completed(self.args, complete_job, name, chunks, chunk)
+                    self._archive_retrieve_completed(self.args, complete_job, name, byte_end - byte_start + 1, chunks, chunk)
                 else:
                     raise RetryConsoleError('job still pending for archive %r' % name)
             else:
@@ -590,7 +593,7 @@ class App(object):
                 job = vault.retrieve_archive(archive_id, byte_range=byte_range)
                 if self.args.wait:
                     wait_until_job_completed([job])
-                    self._archive_retrieve_completed(self.args, job, name, chunks, chunk)
+                    self._archive_retrieve_completed(self.args, job, name, byte_end - byte_start + 1, chunks, chunk)
                 else:
                     raise RetryConsoleError('queued retrieval job for archive %r' % name)
 
